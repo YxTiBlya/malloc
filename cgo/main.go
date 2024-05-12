@@ -8,7 +8,7 @@ import (
 )
 
 func y_malloc(size uint8) *uintptr {
-	return (*uintptr)(C.y_malloc(C.ulonglong(size)))
+	return (*uintptr)(C.y_malloc(C.ulong(size)))
 }
 
 func y_free(ptr *uintptr) {
