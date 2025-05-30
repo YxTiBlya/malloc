@@ -1,33 +1,30 @@
 #include "y_malloc.h"
 
-static vmem_t  y_mem;
+static vmem_t y_mem;
 static alloc_t* y_alloc;
 
 void* y_malloc(size_t size)
 {
     assert((size+HEADER_SIZE) <= HEAP_SIZE);
-
     if (!y_alloc)
     {
         y_alloc = y_create_alloc(size);
     }
-
+    
     return y_allocate(y_alloc, 1, size);
 }
 
 void* y_calloc(size_t count, size_t size)
 {
-    assert(((size+HEADER_SIZE)*count) <= HEAP_SIZE);
-
+    assert((size*count+HEADER_SIZE) <= HEAP_SIZE);
+    
     if (!y_alloc)
     {
-        y_alloc = y_create_alloc(size);
+        y_alloc = y_create_alloc(count*size);
     }
 
     return y_allocate(y_alloc, count, size);
 }
-
-// TODO: realloc
 
 void y_free(void* ptr)
 {
@@ -44,7 +41,11 @@ void* y_allocate(alloc_t* alloc, size_t count, size_t size)
     y_find_best_node(alloc, total_size, &node, &last_node);
     if (!node)
     {
-        y_create_node(alloc, total_size, &node, last_node);
+        y_create_node(alloc, total_size, &node, last_node, false);
+    }
+    if (node->size > total_size)
+    {
+        y_divide_node(alloc, total_size, &node);
     }
 
     node->is_used = 1;
@@ -62,7 +63,7 @@ void y_deallocate(alloc_t* alloc, void* data_ptr)
 {
     u8* ptr = (u8*)data_ptr - HEADER_SIZE;
     node_t* current = alloc->head;
-    node_t *target_node, *prev, *last;
+    node_t *target_node, *freed_node, *prev, *last;
 
     while (current)
     {
@@ -76,6 +77,7 @@ void y_deallocate(alloc_t* alloc, void* data_ptr)
     }
 
     current = target_node;
+    if (current->is_used) { alloc->used -= current->size; }
     current->is_used = 0;
 
     while (current && !current->is_used)
@@ -87,25 +89,31 @@ void y_deallocate(alloc_t* alloc, void* data_ptr)
     current = last;
     last = last->next;
 
+    long freed_mem = 0;
     while (current && !current->is_used)
     {
         prev = current->prev;
-        alloc->used -= current->size;
+        freed_mem += current->size;
         free(current);
         current = prev;
     }
 
-    if (current) { current->next = last; }
+    if (current) 
+    {
+        y_create_node(alloc, freed_mem, &freed_node, current, true);
+        freed_node->next = last;
+    }
     if (last)
     {
         if (current)
         {
-            last->prev = current;
+            last->prev = freed_node;
         }
         else
         {
-            last->prev = NULL;
-            alloc->head = last;
+            y_create_node(alloc, freed_mem, NULL, NULL, true);
+            alloc->head->next = last;
+            last->prev = alloc->head;
         }
     }
 }
@@ -116,14 +124,13 @@ alloc_t* y_create_alloc(size_t size)
     memset(alloc, 0, sizeof(alloc_t));
 
     alloc->data = y_mem.heap;
-    alloc->used = 0;
 
-    y_create_node(alloc, size+HEADER_SIZE, NULL, NULL);
+    y_create_node(alloc, size+HEADER_SIZE, NULL, NULL, false);
 
     return alloc;
 }
 
-void y_create_node(alloc_t* alloc, size_t size, node_t** out_node, node_t* last_node)
+void y_create_node(alloc_t* alloc, size_t size, node_t** out_node, node_t* last_node, bool freed)
 {
     node_t* new_node = malloc(sizeof(node_t));
     new_node->next = NULL;
@@ -144,7 +151,7 @@ void y_create_node(alloc_t* alloc, size_t size, node_t** out_node, node_t* last_
         alloc->head = new_node;
     }
 
-    alloc->used += size;
+    if (!freed) { alloc->used += size; }
 }
 
 void y_find_best_node(alloc_t* alloc, size_t size, node_t** out_node, node_t** out_last_node)
@@ -179,6 +186,24 @@ void y_find_best_node(alloc_t* alloc, size_t size, node_t** out_node, node_t** o
     *out_last_node = last;
 }
 
+void y_divide_node(alloc_t* alloc, size_t size, node_t** out_node)
+{
+    node_t* new_node = *out_node;
+    node_t* recidue_node = malloc(sizeof(node_t));
+
+    recidue_node->data = new_node->data + size;
+    recidue_node->prev = new_node;
+    recidue_node->next = new_node->next;
+    recidue_node->size = new_node->size - size;
+    recidue_node->is_used = 0;
+    
+    new_node->next = recidue_node;
+    new_node->size = size;
+    alloc->used += size;
+    
+    *out_node = new_node;
+}
+
 void log_alloc()
 {
     node_t* curr = y_alloc->head;
@@ -186,7 +211,7 @@ void log_alloc()
     int i = 1;
     while (curr)
     {
-        printf("%d) ptr: [%p], value: [%d], size: [%zu bytes]\n", i, curr->data, *(curr->data+HEADER_SIZE), curr->size);
+        printf("%d) ptr: [%p], value: [%d], size: [%zu bytes] used: [%d]\n", i, curr->data, *(curr->data+HEADER_SIZE), curr->size, curr->is_used);
         curr = curr->next;
         i++;
     }
@@ -194,19 +219,34 @@ void log_alloc()
     printf("total memory: %d bytes\nfree memory: %zu bytes\nused memory: %zu bytes\n", HEAP_SIZE, HEAP_SIZE-y_alloc->used, y_alloc->used);
 }
 
-int main(int argc, char** argv)
-{
-    long *ptr1, *ptr2;
+// TODO: realloc
+// int main(int argc, char** argv)
+// {
+//     long *ptr1, *ptr2, *ptr3;
 
-    ptr1 = y_malloc(sizeof(long));
-    *ptr1 = 12;
+//     ptr1 = y_malloc(sizeof(long));
+//     *ptr1 = 1;
 
-    ptr2 = y_malloc(sizeof(long));
-    *ptr2 = 15;
+//     ptr2 = y_malloc(sizeof(long));
+//     *ptr2 = 2;
 
-    y_free(ptr2);
+//     ptr3 = y_malloc(sizeof(long));
+//     *ptr3 = 3;
 
-    log_alloc();
+//     y_free(ptr2);
+//     y_free(ptr1);
 
-    return 0;
-}
+//     ptr2 = y_calloc(25, sizeof(long));
+//     ptr2 -= sizeof(long);
+//     for (int i = 0; i < 25; i++) {
+//         ptr2 += sizeof(long);
+//         *ptr2 = 4;
+//     };
+
+//     ptr1 = y_malloc(sizeof(long));
+//     *ptr1 = 5;
+    
+//     log_alloc();
+
+//     return 0;
+// }
